@@ -1,4 +1,4 @@
-import AVFoundation
+﻿import AVFoundation
 import Foundation
 import Observation
 import os
@@ -22,7 +22,7 @@ enum SoundscapeMode: String, CaseIterable, Identifiable {
 }
 
 final class AudioSynthState: @unchecked Sendable {
-    struct Parameters {
+    struct Parameters: Sendable {
         var mode: SoundscapeMode = .off
         var volume: Float = 0.45
         var brownLast: Float = 0.0
@@ -44,63 +44,76 @@ final class AudioSynthState: @unchecked Sendable {
     }
 
     func render(frameCount: Int, sampleRate: Double, leftBuffer: UnsafeMutablePointer<Float>, rightBuffer: UnsafeMutablePointer<Float>) {
-        lock.withLock { state in
-            guard state.mode != .off, state.volume > 0.001 else {
-                for i in 0..<frameCount {
-                    leftBuffer[i] = 0
-                    rightBuffer[i] = 0
-                }
-                return
-            }
+        var state = lock.withLock { $0 }
 
-            let vol = state.volume
+        guard state.mode != .off, state.volume > 0.001 else {
             for i in 0..<frameCount {
-                // Fast deterministic Xorshift64 white noise in [-1, 1]
-                state.rngState ^= state.rngState << 13
-                state.rngState ^= state.rngState >> 7
-                state.rngState ^= state.rngState << 17
-                let white = Float(Int64(bitPattern: state.rngState)) / Float(Int64.max)
-
-                switch state.mode {
-                case .off:
-                    leftBuffer[i] = 0
-                    rightBuffer[i] = 0
-
-                case .brownNoise:
-                    state.brownLast = (state.brownLast + (0.025 * white)) / 1.025
-                    let sample = max(-1.0, min(1.0, state.brownLast * 3.2)) * vol
-                    leftBuffer[i] = sample
-                    rightBuffer[i] = sample * 0.96
-
-                case .rain:
-                    // Filtered noise bed + occasional soft droplet impulses
-                    state.rainFilter = state.rainFilter * 0.88 + white * 0.12
-                    if (state.rngState & 0x3FFF) == 1 {
-                        state.dropEnvelope = 0.35
-                    }
-                    state.dropEnvelope *= 0.996
-                    let bed = state.rainFilter * 1.9
-                    let drop = white * state.dropEnvelope
-                    leftBuffer[i] = max(-1.0, min(1.0, (bed + drop * 0.8))) * vol
-                    rightBuffer[i] = max(-1.0, min(1.0, (bed * 0.95 + drop * 1.1))) * vol
-
-                case .binaural:
-                    // 200 Hz Left + 240 Hz Right = 40 Hz Gamma focus beat + gentle warm bed
-                    let incL = 200.0 / sampleRate
-                    let incR = 240.0 / sampleRate
-                    state.phaseLeft += incL
-                    if state.phaseLeft >= 1.0 { state.phaseLeft -= 1.0 }
-                    state.phaseRight += incR
-                    if state.phaseRight >= 1.0 { state.phaseRight -= 1.0 }
-
-                    state.brownLast = (state.brownLast + (0.015 * white)) / 1.015
-                    let bed = state.brownLast * 0.75
-                    let toneL = Float(sin(state.phaseLeft * 2.0 * .pi)) * 0.24
-                    let toneR = Float(sin(state.phaseRight * 2.0 * .pi)) * 0.24
-                    leftBuffer[i] = max(-1.0, min(1.0, toneL + bed)) * vol
-                    rightBuffer[i] = max(-1.0, min(1.0, toneR + bed)) * vol
-                }
+                leftBuffer[i] = 0
+                rightBuffer[i] = 0
             }
+            return
+        }
+
+        let vol = state.volume
+        for i in 0..<frameCount {
+            state.rngState ^= state.rngState << 13
+            state.rngState ^= state.rngState >> 7
+            state.rngState ^= state.rngState << 17
+            let white = Float(Int64(bitPattern: state.rngState)) / Float(Int64.max)
+
+            switch state.mode {
+            case .off:
+                leftBuffer[i] = 0
+                rightBuffer[i] = 0
+
+            case .brownNoise:
+                state.brownLast = (state.brownLast + (0.025 * white)) / 1.025
+                let sample = max(-1.0, min(1.0, state.brownLast * 3.2)) * vol
+                leftBuffer[i] = sample
+                rightBuffer[i] = sample * 0.96
+
+            case .rain:
+                state.rainFilter = state.rainFilter * 0.88 + white * 0.12
+                if (state.rngState & 0x3FFF) == 1 {
+                    state.dropEnvelope = 0.35
+                }
+                state.dropEnvelope *= 0.996
+                let bed = state.rainFilter * 1.9
+                let drop = white * state.dropEnvelope
+                leftBuffer[i] = max(-1.0, min(1.0, (bed + drop * 0.8))) * vol
+                rightBuffer[i] = max(-1.0, min(1.0, (bed * 0.95 + drop * 1.1))) * vol
+
+            case .binaural:
+                let incL = 200.0 / sampleRate
+                let incR = 240.0 / sampleRate
+                state.phaseLeft += incL
+                if state.phaseLeft >= 1.0 { state.phaseLeft -= 1.0 }
+                state.phaseRight += incR
+                if state.phaseRight >= 1.0 { state.phaseRight -= 1.0 }
+
+                state.brownLast = (state.brownLast + (0.015 * white)) / 1.015
+                let bed = state.brownLast * 0.75
+                let toneL = Float(sin(state.phaseLeft * 2.0 * .pi)) * 0.24
+                let toneR = Float(sin(state.phaseRight * 2.0 * .pi)) * 0.24
+                leftBuffer[i] = max(-1.0, min(1.0, toneL + bed)) * vol
+                rightBuffer[i] = max(-1.0, min(1.0, toneR + bed)) * vol
+            }
+        }
+
+        let updatedBrown = state.brownLast
+        let updatedRain = state.rainFilter
+        let updatedDrop = state.dropEnvelope
+        let updatedPhaseL = state.phaseLeft
+        let updatedPhaseR = state.phaseRight
+        let updatedRng = state.rngState
+
+        lock.withLock { current in
+            current.brownLast = updatedBrown
+            current.rainFilter = updatedRain
+            current.dropEnvelope = updatedDrop
+            current.phaseLeft = updatedPhaseL
+            current.phaseRight = updatedPhaseR
+            current.rngState = updatedRng
         }
     }
 }
