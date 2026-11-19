@@ -1,0 +1,76 @@
+name: Build iOS 26 IPA
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Build Unsigned IPA (iOS 26 SDK)
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$XCODE_PATH" ]; then
+            echo "Selecting $XCODE_PATH"
+            sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install XcodeGen & Generate Xcode Project
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+
+      - name: Build Release App (Unsigned for LiveContainer)
+        run: |
+          xcodebuild \
+            -project GlassPulse.xcodeproj \
+            -scheme GlassPulse \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Package .ipa
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/GlassPulse.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Error: GlassPulse.app not found at $APP_PATH"
+            exit 1
+          fi
+          mkdir -p ipa_staging/Payload
+          cp -r "$APP_PATH" ipa_staging/Payload/
+          cd ipa_staging
+          zip -qry ../GlassPulse-iOS26.ipa Payload
+          cd ..
+          ls -lh GlassPulse-iOS26.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlassPulse-iOS26-IPA
+          path: GlassPulse-iOS26.ipa
+          retention-days: 30
+
+      - name: Publish GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: GlassPulse-iOS26.ipa
